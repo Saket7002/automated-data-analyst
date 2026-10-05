@@ -59,6 +59,7 @@ def _parse_numeric_suggestion_values(series: pd.Series) -> pd.Series | None:
 
     parsed: list[float | None] = []
     suffixes: list[str] = []
+    currencies: list[str] = []
 
     for value in values:
         if pd.isna(value):
@@ -75,6 +76,9 @@ def _parse_numeric_suggestion_values(series: pd.Series) -> pd.Series | None:
         suffix = (match.group("suffix") or "").strip().lower()
         suffixes.append(suffix)
 
+        currency = match.group("currency") or ""
+        currencies.append(currency)
+
         number = match.group("number").replace(",", "")
         amount = float(number)
 
@@ -86,34 +90,66 @@ def _parse_numeric_suggestion_values(series: pd.Series) -> pd.Series | None:
     if len(set(suffixes)) > 1:
         return None
 
+    if len(set(currencies)) > 1:
+        return None
+
     return pd.Series(parsed, index=series.index, dtype="float64")
 
-def _split_suggestion_values(series: pd.Series) -> pd.Series | None:
-    """Split consistently delimited text values without guessing."""
+def _split_suggestion_values(series: pd.Series) -> pd.DataFrame | None:
+    """Split consistently delimited text values into separate columns."""
     values = series.astype("string").str.strip()
 
     delimiters = ["/", "|", ";", ","]
     detected_delimiter: str | None = None
 
     for delimiter in delimiters:
-        if values.str.contains(re.escape(delimiter), regex=True, na=False).all():
+        non_null = values.dropna()
+        if not non_null.empty and non_null.str.contains(
+            re.escape(delimiter), regex=True, na=False
+        ).all():
             detected_delimiter = delimiter
             break
 
     if detected_delimiter is None:
         return None
 
-    split_values = values.str.split(detected_delimiter)
+    split_values = values.str.split(detected_delimiter, expand=True)
 
-    if split_values.map(lambda parts: len(parts) if parts is not None else 0).nunique() != 1:
+    if split_values.shape[1] < 2:
         return None
 
-    if split_values.map(lambda parts: len(parts) if parts is not None else 0).iloc[0] < 2:
-        return None
-
-    return split_values.map(
-        lambda parts: [part.strip() for part in parts] if parts is not None else None
+    split_values = split_values.map(
+        lambda value: value.strip() if isinstance(value, str) else value
     )
+
+    return split_values
+
+
+def _split_cleaning_result(
+    dataframe: pd.DataFrame,
+    column: str,
+) -> pd.DataFrame | None:
+    """Return split values as separate uniquely named columns."""
+    split_values = _split_suggestion_values(dataframe[column])
+
+    if split_values is None:
+        return None
+
+    new_columns = pd.Index(
+        [f"{column}_{i}" for i in range(1, split_values.shape[1] + 1)]
+    )
+
+    existing_columns = pd.Index(
+        [name for name in dataframe.columns if name != column]
+    )
+
+    combined_columns = existing_columns.append(new_columns)
+    unique_columns = _make_unique_columns(combined_columns)
+
+    split_values = split_values.copy()
+    split_values.columns = unique_columns[-len(new_columns):]
+
+    return split_values
 
 
 def suggest_cleaning(dataframe: pd.DataFrame) -> list[CleaningSuggestion]:
@@ -185,12 +221,14 @@ def preview_cleaning_suggestion(
             )
 
     elif suggestion.operation == "split":
-        after = _split_suggestion_values(before)
+        split_values = _split_suggestion_values(before)
 
-        if after is None:
+        if split_values is None:
             raise ValueError(
                 "The column no longer matches the suggested split transformation."
             )
+
+        after = split_values.astype("string").agg(" | ".join, axis=1)
 
     else:
         raise ValueError(
@@ -203,24 +241,7 @@ def preview_cleaning_suggestion(
             "after": after,
         }
     )
-    """Return real before/after values for a cleaning suggestion."""
-    if suggestion.operation != "parse_numeric":
-        raise ValueError(f"Unsupported cleaning operation: {suggestion.operation}")
 
-    before = dataframe[suggestion.column]
-    after = _parse_numeric_suggestion_values(before)
-
-    if after is None:
-        raise ValueError(
-            "The column no longer matches the suggested numeric transformation."
-        )
-
-    return pd.DataFrame(
-        {
-            "before": before,
-            "after": after,
-        }
-    )
 
 def apply_cleaning_suggestion(
     dataframe: pd.DataFrame,
@@ -240,14 +261,20 @@ def apply_cleaning_suggestion(
         cleaned[suggestion.column] = parsed
 
     elif suggestion.operation == "split":
-        split_values = _split_suggestion_values(cleaned[suggestion.column])
+        split_values = _split_cleaning_result(
+            cleaned,
+            suggestion.column,
+        )
 
         if split_values is None:
             raise ValueError(
                 "The column no longer matches the suggested split transformation."
             )
 
-        cleaned[suggestion.column] = split_values
+        cleaned = cleaned.drop(columns=[suggestion.column])
+
+        for column in split_values.columns:
+            cleaned[column] = split_values[column]
 
     else:
         raise ValueError(

@@ -191,9 +191,9 @@ class CleanDataframeTests(unittest.TestCase):
         self.assertEqual(
             preview["after"].tolist(),
             [
-                ["West", "Enterprise"],
-                ["East", "Consumer"],
-                ["South", "Enterprise"],
+                "West | Enterprise",
+                "East | Consumer",
+                "South | Enterprise",
             ],
         )
 
@@ -228,13 +228,111 @@ class CleanDataframeTests(unittest.TestCase):
 
         cleaned = apply_cleaning_suggestion(frame, suggestion)
 
+        self.assertNotIn("Segment", cleaned.columns)
+
         self.assertEqual(
-            cleaned["Segment"].tolist(),
-            [
-                ["West", "Enterprise"],
-                ["East", "Consumer"],
-                ["South", "Enterprise"],
-            ],
+            cleaned["Segment_1"].tolist(),
+            ["West", "East", "South"],
+        )
+
+        self.assertEqual(
+            cleaned["Segment_2"].tolist(),
+            ["Enterprise", "Consumer", "Enterprise"],
+        )
+
+    def test_apply_split_cleaning_suggestion_preserves_nulls(self):
+        frame = pd.DataFrame(
+            {
+                "Segment": [
+                    "West / Enterprise",
+                    None,
+                    "South / Enterprise",
+                ]
+            }
+        )
+
+        suggestion = suggest_cleaning(frame)[0]
+
+        cleaned = apply_cleaning_suggestion(frame, suggestion)
+
+        self.assertEqual(cleaned.loc[0, "Segment_1"], "West")
+        self.assertTrue(pd.isna(cleaned.loc[1, "Segment_1"]))
+        self.assertEqual(cleaned.loc[2, "Segment_1"], "South")
+
+        self.assertEqual(cleaned.loc[0, "Segment_2"], "Enterprise")
+        self.assertTrue(pd.isna(cleaned.loc[1, "Segment_2"]))
+        self.assertEqual(cleaned.loc[2, "Segment_2"], "Enterprise")
+
+    def test_apply_split_cleaning_suggestion_avoids_existing_column_names(self):
+        frame = pd.DataFrame(
+            {
+                "Segment": [
+                    "West / Enterprise",
+                    "East / Consumer",
+                ],
+                "Segment_1": [
+                    "existing value 1",
+                    "existing value 2",
+                ],
+            }
+        )
+
+        suggestion = suggest_cleaning(frame)[0]
+
+        cleaned = apply_cleaning_suggestion(frame, suggestion)
+
+        self.assertIn("Segment_1", cleaned.columns)
+        self.assertIn("Segment_1_2", cleaned.columns)
+        self.assertIn("Segment_2", cleaned.columns)
+
+        self.assertEqual(
+            cleaned["Segment_1"].tolist(),
+            ["existing value 1", "existing value 2"],
+        )
+
+        self.assertEqual(
+            cleaned["Segment_1_2"].tolist(),
+            ["West", "East"],
+        )
+
+        self.assertEqual(
+            cleaned["Segment_2"].tolist(),
+            ["Enterprise", "Consumer"],
+        )
+
+    def test_numeric_cleaning_suggestion_allows_consistent_currency(self):
+        frame = pd.DataFrame(
+            {
+                "Revenue": ["$100", "$200", "$300"],
+            }
+        )
+
+        suggestions = suggest_cleaning(frame)
+
+        self.assertTrue(
+            any(
+                suggestion.column == "Revenue"
+                and suggestion.operation == "parse_numeric"
+                for suggestion in suggestions
+            )
+        )
+
+
+    def test_numeric_cleaning_suggestion_rejects_mixed_currencies(self):
+        frame = pd.DataFrame(
+            {
+                "Revenue": ["$100", "\u20ac200", "$300"],
+            }
+        )
+
+        suggestions = suggest_cleaning(frame)
+
+        self.assertFalse(
+            any(
+                suggestion.column == "Revenue"
+                and suggestion.operation == "parse_numeric"
+                for suggestion in suggestions
+            )
         )
 
 class RepeatRowTests(unittest.TestCase):
